@@ -1,0 +1,289 @@
+plugins {
+  id "java"
+  id "jvm-test-suite"
+  id "groovy"
+  id "jacoco"
+  id "biz.aQute.bnd.builder" version "7.3.0"
+  id "maven-publish"
+  id "signing"
+  id 'pl.allegro.tech.build.axion-release' version '1.21.2'
+  id "com.github.hierynomus.license" version "0.16.1"
+  id "com.bmuschko.docker-remote-api" version "9.2.1"
+  id 'ru.vyarus.github-info' version '2.0.0'
+  id "io.github.gradle-nexus.publish-plugin" version "2.0.0"
+}
+
+group = "com.hierynomus"
+ext.moduleName = "${project.group}.${project.name}"
+
+defaultTasks "build"
+
+repositories {
+  mavenCentral()
+}
+
+github {
+    user 'hierynomus'
+    license 'Apache'
+}
+
+scmVersion {
+  tag {
+    prefix = 'v'
+    versionSeparator = ''
+  }
+  hooks {
+    pre 'fileUpdate', [file: 'README.adoc', pattern: { v, c -> /:sshj_version: .*/}, replacement: { v, c -> ":sshj_version: $v" }]
+    pre 'commit'
+  }
+}
+
+project.version = scmVersion.version
+
+compileJava {
+  options.release = 8
+}
+
+tasks.withType(JavaCompile).configureEach {
+  options.encoding = 'UTF-8'
+}
+
+configurations.implementation.transitive = false
+
+def bouncycastleVersion = "1.84"
+def sshdVersion = "2.15.0"
+
+dependencies {
+  implementation "org.slf4j:slf4j-api:2.0.17"
+  implementation "org.bouncycastle:bcprov-jdk18on:$bouncycastleVersion"
+  implementation "org.bouncycastle:bcpkix-jdk18on:$bouncycastleVersion"
+  implementation "com.hierynomus:asn-one:0.6.0"
+}
+
+license {
+  header rootProject.file('LICENSE_HEADER')
+  strictCheck true
+  mapping {
+    java = 'SLASHSTAR_STYLE'
+  }
+  excludes([
+    '**/com/hierynomus/sshj/userauth/keyprovider/bcrypt/*.java',
+    '**/files/test_file_*.txt',
+  ])
+}
+
+java {
+	withJavadocJar()
+	withSourcesJar()
+}
+
+if (!JavaVersion.current().isJava9Compatible()) {
+  throw new GradleScriptException("Minimum compilation version is Java 9")
+}
+
+// This disables the pedantic doclint feature of JDK8
+if (JavaVersion.current().isJava8Compatible()) {
+  tasks.withType(Javadoc) {
+    options.addStringOption('Xdoclint:none', '-quiet')
+  }
+}
+
+testing {
+  suites {
+    configureEach {
+      useJUnitJupiter()
+      dependencies {
+        implementation "org.slf4j:slf4j-api:2.0.17"
+        implementation 'org.apache.groovy:groovy:4.0.30'
+        implementation 'org.spockframework:spock-core:2.3-groovy-4.0'
+        implementation "org.mockito:mockito-core:5.16.1"
+        implementation "org.assertj:assertj-core:3.27.3"
+        implementation "ru.vyarus:spock-junit5:1.2.0"
+        implementation "org.apache.sshd:sshd-core:$sshdVersion"
+        implementation "org.apache.sshd:sshd-sftp:$sshdVersion"
+        implementation "org.apache.sshd:sshd-scp:$sshdVersion"
+        implementation "ch.qos.logback:logback-classic:1.5.18"
+      }
+
+      targets {
+        all {
+          testTask.configure {
+            testLogging {
+              showStandardStreams = false
+              exceptionFormat = 'full'
+            }
+            include "**/*Test.*"
+            include "**/*Spec.*"
+            afterSuite { descriptor, result ->
+              def indicator = "\u001B[32m✓\u001b[0m"
+              if (result.failedTestCount > 0) {
+                indicator = "\u001B[31m✘\u001b[0m"
+              }
+              logger.lifecycle("$indicator Test ${descriptor.name}; Executed: ${result.testCount}/\u001B[32m${result.successfulTestCount}\u001B[0m/\u001B[31m${result.failedTestCount}\u001B[0m")
+            }
+          }
+        }
+      }
+    }
+
+    test {
+      sources {
+        groovy {
+          srcDirs = ['src/test/groovy']
+        }
+      }
+    }
+
+    integrationTest(JvmTestSuite) {
+      dependencies {
+        implementation project()
+        implementation platform('org.testcontainers:testcontainers-bom:1.20.6')
+        implementation 'org.testcontainers:junit-jupiter'
+      }
+
+      sources {
+        java {
+          srcDirs = ['src/itest/java']
+        }
+
+        resources {
+          srcDirs = ['src/itest/resources']
+        }
+      }
+
+      targets {
+        all {
+          testTask.configure {
+            shouldRunAfter(test)
+          }
+        }
+      }
+    }
+  }
+}
+
+project.tasks.compileGroovy.onlyIf { false }
+
+task writeSshjVersionProperties {
+  doLast {
+    def resourcesDir = project.layout.buildDirectory.dir("resources/main").get().asFile
+    resourcesDir.mkdirs()
+    new File(resourcesDir, "sshj.properties").withWriter { w ->
+      w.append("sshj.version=${version}")
+    }
+  }
+}
+
+jar.dependsOn writeSshjVersionProperties
+jar {
+  inputs.property("moduleName", moduleName)
+  manifest {
+    attributes 'Automatic-Module-Name': moduleName
+  }
+}
+
+sourcesJar {
+  def bundleSymbolicName = "${project.group}.${project.name}"
+  def bundleVersion = project.version.toString().replaceFirst('-', '.')
+  manifest {
+    attributes(
+      "Bundle-ManifestVersion": "2",
+      "Bundle-Name": "${project.name} Source",
+      "Bundle-Version": bundleVersion,
+      "Eclipse-SourceBundle": "${bundleSymbolicName};version=\"${bundleVersion}\";roots:=\".\"",
+      "Bundle-SymbolicName": "${bundleSymbolicName}.source"
+    )
+  }
+}
+
+publishing {
+	publications {
+		maven(MavenPublication) {
+			from(components.java)
+		}
+	}
+}
+
+project.signing {
+  required { project.gradle.taskGraph.hasTask("release") }
+	sign publishing.publications.maven
+
+  if (project.hasProperty("signingKeyId") || project.hasProperty("signingKey")) {
+		def signingKeyId = project.findProperty("signingKeyId")
+		def signingKey = project.findProperty("signingKey")
+		def signingPassword = project.findProperty("signingPassword")
+		if (signingKeyId) {
+			useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+		} else if (signingKey) {
+			useInMemoryPgpKeys(signingKey, signingPassword)
+		}
+	}
+}
+
+project.plugins.withType(MavenPublishPlugin).all {
+	PublishingExtension publishing = project.extensions.getByType(PublishingExtension)
+	publishing.publications.withType(MavenPublication).all { mavenPublication ->
+		mavenPublication.pom {
+			name = "${project.name}"
+      description = 'SSHv2 library for Java'
+      inceptionYear = '2009'
+      url = "https://github.com/hierynomus/${project.name}"
+			licenses {
+				license {
+					name = "The Apache License, Version 2.0"
+					url = "https://www.apache.org/licenses/LICENSE-2.0"
+				}
+			}
+            developers {
+                developer {
+                    id = "hierynomus"
+                    name = "Jeroen van Erp"
+                    email = "jeroen@hierynomus.com"
+                }
+                developer {
+                    id = "shikhar"
+                    name = "Shikhar Bhushan"
+                    email = "shikhar@schmizz.net"
+                    url = "http://schmizz.net"
+                    roles = ["Previous Lead developer"]
+                }
+                developer {
+                    id = "iterate"
+                    name = "David Kocher"
+                    email = "dkocher@iterate.ch"
+                    organization = "iterate GmbH"
+                    organizationUrl = "https://iterate.ch"
+                    roles = ["Developer"]
+                }
+            }
+            scm {
+                url = "https://github.com/hierynomus/${project.name}"
+                connection = "scm:git@github.com:hierynomus/${project.name}.git"
+                developerConnection = "scm:git@github.com:hierynomus/${project.name}.git"
+            }
+        }
+    }
+}
+
+nexusPublishing {
+	repositories {
+		sonatype {
+			nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
+			snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
+		}
+	}
+
+	connectTimeout = Duration.ofMinutes(3)
+	clientTimeout = Duration.ofMinutes(3)
+}
+
+jacocoTestReport {
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+project.tasks.release.dependsOn([project.tasks.integrationTest, project.tasks.build])
+project.tasks.jacocoTestReport.dependsOn(project.tasks.test)
+project.tasks.check.dependsOn(project.tasks.jacocoTestReport)
